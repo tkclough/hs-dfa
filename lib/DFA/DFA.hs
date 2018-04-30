@@ -40,7 +40,7 @@ data DFAState q a = DFAState {
 data DFAError q a = NoMember (q, a) 
                   | NotInAlphabet a deriving (Show, Eq)
 
-accepts :: (Ord a, Ord q, Show q, Show a, MonadState (DFAState q a) m, MonadReader (DFA q a) m, MonadError (DFAError q a) m) => m Bool
+accepts :: (Ord a, Ord q, MonadState (DFAState q a) m, MonadReader (DFA q a) m, MonadError (DFAError q a) m) => m Bool
 accepts = do 
     finished <- null <$> gets input 
     if finished 
@@ -62,7 +62,7 @@ accepts = do
 
             accepts 
 
-runDFA :: DFA Text Text -> [Text] -> Either (DFAError Text Text) Bool
+runDFA :: (Ord q, Ord a) => DFA q a -> [a] -> Either (DFAError q a) Bool
 runDFA mach input = runExcept . flip runReaderT mach . flip evalStateT initState $ accepts 
     where initState = DFAState (initial mach) input
 
