@@ -9,106 +9,77 @@ import Control.Monad.Except
 import Data.Map (Map)
 import Data.Set (Set)
 import Data.Maybe (isNothing, fromJust)
-import Data.Text (Text, pack, append, unwords)
-import Data.Void
+import Data.Text (Text, pack)
 
 import Prelude hiding (lookup, unwords)
 
 import qualified Data.Map as M 
 import qualified Data.Set as S
-import qualified Data.Text.IO as T
 
 import Text.Megaparsec
 import Text.Megaparsec.Char
-import qualified Text.Megaparsec.Char.Lexer as L
 
+-- | Representation of a deterministic finite automaton, a finite-state machine 
+-- | that recognize regular languages.
 data DFA q a = DFA {
-    states :: Set q,
-    alphabet :: Set a,
-    transition :: Map (q, a) q,
-    initial :: q,
-    accept :: Set q
+    states :: Set q,            -- ^ a finite set of states
+    alphabet :: Set a,          -- ^ a finite set of input symbols
+    transition :: Map (q, a) q, -- ^ a transition function
+    initial :: q,               -- ^ an initial state
+    accept :: Set q             -- ^ a set of accept states
 } deriving (Show, Eq)
 
--- Q0,Q1,Q2 | 0,1 | (Q0,0)->Q0, (Q0,1)->Q1, (Q1,0)->Q2, (Q1,1)->Q2, (Q2,0)->Q0, (Q0,1)->Q1 | Q0 | Q0
-
+-- | Representation of the current state of the DFA.
 data DFAState q a = DFAState {
-    currentState :: q,
-    input :: [a]
+    currentState :: q, -- ^ the current state of the DFA
+    input :: [a]       -- ^ the rest of the input to consume
 } deriving (Show, Eq)
 
+-- | Encode errors that can occur in simulation.
 data DFAError q a = NoMember (q, a) 
                   | NotInAlphabet a deriving (Show, Eq)
 
+-- | Determine whether a given DFA will accept some given input.
 accepts :: (Ord a, Ord q, MonadState (DFAState q a) m, MonadReader (DFA q a) m, MonadError (DFAError q a) m) => m Bool
 accepts = do 
     finished <- null <$> gets input 
     if finished 
-        then S.member <$> gets currentState <*> asks accept -- we're done, check if in accepting state
-        else do 
-            (x:xs) <- gets input 
-            current <- gets currentState
+        then inAcceptState
+        else loop >> accepts
+            
+-- | Check if in accept state.
+inAcceptState :: (Ord a, Ord q, MonadState (DFAState q a) m, MonadReader (DFA q a) m) => m Bool
+inAcceptState = S.member <$> gets currentState <*> asks accept
 
-            isInAlphabet <- S.member x <$> asks alphabet
-            unless isInAlphabet $ throwError (NotInAlphabet x)
+-- | Throw an exception if the provided symbol isn't in the alphabet.
+checkAlphabet :: (Ord a, Ord q, MonadReader (DFA q a) m, MonadError (DFAError q a) m) => a -> m ()
+checkAlphabet x = do
+  isInAlphabet <- S.member x <$> asks alphabet
+  unless isInAlphabet $ throwError (NotInAlphabet x)
 
-            let key = (current, x)
+-- | Attempt to lookup (state, symbol) pair; return if found, or throw otherwise.
+lookupOrThrow :: (Ord a, Ord q, MonadReader (DFA q a) m, MonadError (DFAError q a) m) => (q, a) -> m q
+lookupOrThrow key = do
+  maybeNextState <- M.lookup key <$> asks transition
+  when (isNothing maybeNextState) $ throwError (NoMember key)
+  return (fromJust maybeNextState)
 
-            maybeNextState <- M.lookup key <$> asks transition
-            when (isNothing maybeNextState) $ throwError (NoMember key) -- no matching entry; throw
+-- | Body of accepts function; attempt to transition to another state or throw an error.
+loop :: (Ord a, Ord q, MonadState (DFAState q a) m, MonadReader (DFA q a) m, MonadError (DFAError q a) m) => m ()
+loop = do
+  (x:xs) <- gets input
+  current <- gets currentState
 
-            let nextState = fromJust maybeNextState
-            put (DFAState nextState xs)
+  checkAlphabet x -- if this symbol isn't recognized, throw
 
-            accepts 
+  nextState <- lookupOrThrow (current, x) -- either get the next state, or throw
+  put (DFAState nextState xs) -- update the state
 
+
+-- | Run a simulation on a machine and some input.
 runDFA :: (Ord q, Ord a) => DFA q a -> [a] -> Either (DFAError q a) Bool
-runDFA mach input = runExcept . flip runReaderT mach . flip evalStateT initState $ accepts 
+runDFA mach input = runExcept . 
+                    flip runReaderT mach . 
+                    flip evalStateT initState $ 
+                    accepts 
     where initState = DFAState (initial mach) input
-
-
--- test
-dfa1 str = runExcept . flip runReaderT dfa . flip runStateT (DFAState "Q0" str) $ accepts 
-    where dfa = DFA (S.fromList ["Q0", "Q1", "Q2"])
-                    (S.fromList [0, 1])
-                    (M.fromList [(("Q0", 0), "Q1"),
-                                 (("Q0", 1), "Q1"),
-                                 (("Q1", 0), "Q2"),
-                                 (("Q1", 1), "Q2"),
-                                 (("Q2", 0), "Q0"),
-                                 (("Q2", 1), "Q0")])
-                    "Q0" 
-                    (S.fromList ["Q0"])
-
-           
-dfa :: (Ord e, MonadParsec e Text m) => m (DFA Text Text)
-dfa = DFA 
-    <$> ((S.fromList <$> statesParser) <* pipe)
-    <*> ((S.fromList <$> alphabetParser) <* pipe)
-    <*> ((M.fromList <$> transitionParser) <* pipe)
-    <*> (initialParser <* pipe)
-    <*> (S.fromList <$> acceptParser)
-
-pipe :: MonadParsec e Text m => m Char
-pipe = space *> char '|' <* space
-
-symbolParser :: MonadParsec e Text m => m Text
-symbolParser = pack <$> some alphaNumChar
-
-statesParser :: MonadParsec e Text m => m [Text]
-statesParser = sepEndBy1 symbolParser (space *> char ',' <* space)
-
-alphabetParser :: MonadParsec e Text m => m [Text]
-alphabetParser = sepEndBy1 symbolParser (space *> char ',' <* space)
-
-transitionParser :: MonadParsec e Text m => m [((Text, Text), Text)]
-transitionParser = sepEndBy1 relation (space *> char ',' <* space)
-    where relation = (,) 
-            <$> (char '(' *> ((,) <$> symbolParser <*> (char ',' *> symbolParser)) <* char ')')
-            <*> (string "->" *> symbolParser)
-
-initialParser :: MonadParsec e Text m => m Text
-initialParser = symbolParser
-
-acceptParser :: MonadParsec e Text m => m [Text]
-acceptParser = statesParser

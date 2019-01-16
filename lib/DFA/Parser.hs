@@ -49,8 +49,6 @@ parens = between (symbol "(") (symbol ")")
 semi :: Parser Text 
 semi = symbol ";"
 
---     \node[state]           (q1) [right of=q0] {$q_1$};
-
 dfaParser :: (Ord q, Ord a) => Parser q -> Parser a -> Parser (DFA q a)
 dfaParser nameParser symbolParser = do 
     nodes <- some (nodeParser nameParser)
